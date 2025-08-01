@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 import httpx
-from .settings import settings
+from settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class SchedulingDependencies:
     
     # Application Configuration
     session_id: Optional[str] = None
-    user_timezone: str = "UTC"
+    user_timezone: str = "America/Bogota"
     business_hours_start: int = 9
     business_hours_end: int = 17
     
@@ -50,7 +50,7 @@ class SchedulingDependencies:
 
 def create_scheduling_dependencies(
     session_id: Optional[str] = None,
-    user_timezone: str = "UTC",
+    user_timezone: str = "America/Bogota",
     http_client: Optional[httpx.AsyncClient] = None
 ) -> SchedulingDependencies:
     """

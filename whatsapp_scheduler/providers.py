@@ -6,13 +6,15 @@ Based on examples/main_agent_reference/providers.py pattern.
 from typing import Optional, Union
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.google_gla import GoogleGLAProvider
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.gemini import GeminiModel
 from pydantic_ai.models.fallback import FallbackModel
-from .settings import settings
+from settings import settings
 
 
-def get_llm_model(model_choice: Optional[str] = None) -> Union[OpenAIModel, AnthropicModel, FallbackModel]:
+def get_llm_model(model_choice: Optional[str] = None) -> Union[OpenAIModel, AnthropicModel, GeminiModel, FallbackModel]:
     """
     Get LLM model configuration based on environment variables with fallback support.
     
@@ -25,21 +27,31 @@ def get_llm_model(model_choice: Optional[str] = None) -> Union[OpenAIModel, Anth
     llm_choice = model_choice or settings.llm_model
     
     try:
-        # Primary model: OpenAI
-        openai_provider = OpenAIProvider(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key
-        )
-        primary_model = OpenAIModel(llm_choice, provider=openai_provider)
+        # Determine provider based on settings
+        if settings.llm_provider.lower() == "gemini":
+            # Primary model: Gemini
+            gemini_provider = GoogleGLAProvider(api_key=settings.llm_api_key)
+            primary_model = GeminiModel(llm_choice, provider=gemini_provider)
+        elif settings.llm_provider.lower() == "anthropic":
+            # Primary model: Anthropic
+            anthropic_provider = AnthropicProvider(api_key=settings.llm_api_key)
+            primary_model = AnthropicModel(llm_choice, provider=anthropic_provider)
+        else:
+            # Primary model: OpenAI (default)
+            openai_provider = OpenAIProvider(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key
+            )
+            primary_model = OpenAIModel(llm_choice, provider=openai_provider)
         
         # Fallback models if available
         fallback_models = []
         
-        # Try to add Anthropic as fallback if available
+        # Try to add other providers as fallback if available
         try:
-            # Check if Anthropic API key is available
+            # Check if Anthropic API key is available and not the primary
             anthropic_key = getattr(settings, 'anthropic_api_key', None)
-            if anthropic_key:
+            if anthropic_key and settings.llm_provider.lower() != "anthropic":
                 anthropic_provider = AnthropicProvider(api_key=anthropic_key)
                 fallback_models.append(
                     AnthropicModel('claude-3-5-haiku-20241022', provider=anthropic_provider)

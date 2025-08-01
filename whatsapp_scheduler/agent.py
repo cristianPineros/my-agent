@@ -7,9 +7,9 @@ import logging
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic_ai import Agent, RunContext
 
-from .providers import get_llm_model
-from .dependencies import SchedulingDependencies
-from .tools import (
+from providers import get_llm_model
+from dependencies import SchedulingDependencies
+from tools import (
     send_whatsapp_message,
     check_calendar_availability,
     book_class,
@@ -24,9 +24,35 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """
 You are a friendly and efficient scheduling assistant for a fitness studio. Your role is to help clients book, reschedule, and manage their class appointments through WhatsApp.
 
+MANDATORY RULES FOR DATE/TIME HANDLING:
+1. CONTEXT AWARENESS - You MUST understand what "today" is:
+   - ALWAYS use get_current_datetime tool first when user mentions relative dates
+   - This gives you context for "próximo viernes", "tomorrow", "next week"
+   - Without current date, you cannot calculate relative dates properly
+
+2. When ANY date or time is mentioned (like "próximo viernes", "tomorrow", "8pm"), you MUST:
+   - FIRST use get_current_datetime to understand current date context
+   - THEN use parse_date_time tool with the user's exact words
+   - NEVER ask the user to provide dates in a specific format
+   - NEVER try to parse dates yourself
+
+3. WORKFLOW EXAMPLE FOR RELATIVE DATES:
+   User: "necesito agendar una clase de pilates para el próximo viernes a las 8pm"
+   You MUST:
+   Step 1: Use get_current_datetime() to know what day it is today
+   Step 2: Use parse_date_time("próximo viernes a las 8pm") with current context
+   Step 3: If successful, ask for name and phone
+   Step 4: Once you have all info, use make_booking tool
+
+4. CONTEXT IS CRITICAL:
+   - "próximo viernes" means different dates depending on what day it is today
+   - Always establish current date context first
+   - Then parse relative expressions with that context
+
 Key responsibilities:
-- Greet clients warmly and professionally
+- Greet clients warmly and professionally (only ONCE per conversation)
 - Understand scheduling requests in natural language
+- Use the parse_date_time tool for ANY date/time expressions
 - Check availability and suggest suitable time slots
 - Handle booking confirmations and send details
 - Manage rescheduling and cancellations
@@ -34,6 +60,7 @@ Key responsibilities:
 - Maintain conversation context throughout the interaction
 
 Guidelines:
+- Do NOT repeat greetings in ongoing conversations
 - Always confirm the details before finalizing a booking
 - Offer 3-5 available time slots when possible
 - Be proactive about potential scheduling conflicts
@@ -55,6 +82,7 @@ You should NOT:
 - Make changes to instructor schedules
 - Share other clients' information
 - Book outside of business hours without special authorization
+- Ask users to format dates - use parse_date_time instead
 
 Always be helpful, professional, and focus on making scheduling as easy as possible for clients.
 """
@@ -154,16 +182,23 @@ async def make_booking(
     Returns:
         Booking confirmation details
     """
-    # Parse date and time if in natural language
-    parsed_datetime = parse_datetime_natural(ctx, f"{date} at {time}")
-    if not parsed_datetime.get("success"):
-        return {
-            "success": False,
-            "error": f"Could not understand date/time: {date} at {time}"
-        }
-    
-    booking_date = parsed_datetime["date"]
-    booking_time = parsed_datetime["time"]
+    # Check if date is already in YYYY-MM-DD format or needs parsing
+    import re
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', date) and re.match(r'^\d{2}:\d{2}$', time):
+        # Date and time are already parsed - use directly
+        booking_date = date
+        booking_time = time
+    else:
+        # Parse date and time from natural language
+        parsed_datetime = parse_datetime_natural(ctx, f"{date} at {time}")
+        if not parsed_datetime.get("success"):
+            return {
+                "success": False,
+                "error": f"Could not understand date/time: {date} at {time}"
+            }
+        
+        booking_date = parsed_datetime["date"]
+        booking_time = parsed_datetime["time"]
     
     return await book_class(
         ctx, client_name, client_phone, booking_date, 
@@ -223,13 +258,67 @@ async def view_bookings(
 
 
 @scheduling_agent.tool
+def get_current_datetime(
+    ctx: RunContext[SchedulingDependencies],
+    timezone: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get the current date and time information.
+    
+    Args:
+        timezone: Optional timezone (defaults to user's timezone)
+    
+    Returns:
+        Current datetime information
+    """
+    from datetime import datetime
+    import pytz
+    
+    # Use user timezone or default
+    tz_str = timezone or ctx.deps.user_timezone
+    
+    try:
+        # Get current time in specified timezone
+        if tz_str == "UTC":
+            now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        else:
+            tz = pytz.timezone(tz_str)
+            now = datetime.now(tz)
+        
+        # Calculate day of week in Spanish and English
+        days_es = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+        days_en = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        
+        return {
+            "current_datetime": now.isoformat(),
+            "current_date": now.strftime('%Y-%m-%d'),
+            "current_time": now.strftime('%H:%M'),
+            "day_of_week": now.weekday(),  # 0=Monday, 6=Sunday
+            "day_name_es": days_es[now.weekday()],
+            "day_name_en": days_en[now.weekday()],
+            "timezone": str(now.tzinfo),
+            "formatted": now.strftime('%A, %B %d, %Y at %I:%M %p')
+        }
+        
+    except Exception as e:
+        return {
+            "error": f"Error getting current time: {str(e)}",
+            "current_date": datetime.now().strftime('%Y-%m-%d'),
+            "current_time": datetime.now().strftime('%H:%M')
+        }
+
+
+@scheduling_agent.tool
 def parse_date_time(
     ctx: RunContext[SchedulingDependencies],
     user_input: str,
     timezone: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Parse natural language date and time expressions.
+    Parse natural language date and time expressions with current date context.
+    
+    IMPORTANT: Use get_current_datetime first to understand what "today" is,
+    then parse relative dates like "próximo miércoles", "tomorrow", etc.
     
     Args:
         user_input: Natural language date/time (e.g., "tomorrow at 3pm", "next Tuesday morning")
